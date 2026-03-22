@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Simulador de Financiamento Imobiliário — FinApps Hub</title>
+<meta name="description" content="Simulador de financiamento imobiliário: SAC vs Price, amortização extra, economia de juros, redução de prazo e exportação CSV." />
+<meta name="keywords" content="simulador financiamento, SAC, Price, amortização extra, juros, financiamento imobiliário, calculadora" />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; background: linear-gradient(145deg, #F8FAFC 0%, #F1F5F9 100%); }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+const {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  LineChart, Line, Legend, BarChart, Bar, Cell,
+} = Recharts;
+
+const C = {
+  navy: "#1B2A4A", navyLight: "#243656", navyDark: "#111D33",
+  green: "#27AE60", greenLight: "#2ECC71", greenDark: "#1E8449",
+  red: "#E74C3C", redLight: "#FF6B6B",
+  gold: "#F39C12", goldDark: "#D68910", blue: "#3498DB",
+  white: "#FFFFFF",
+  g50: "#F8FAFC", g100: "#F1F5F9", g200: "#E2E8F0", g300: "#CBD5E1",
+  g400: "#94A3B8", g500: "#64748B", g600: "#475569", g700: "#334155",
+};
+
+const fmt = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(v);
+const fmtShort = (v) => {
+  if (Math.abs(v) >= 1e6) return "R$" + (v / 1e6).toFixed(1) + "M";
+  if (Math.abs(v) >= 1e3) return "R$" + (v / 1e3).toFixed(1) + "K";
+  return "R$" + v.toFixed(0);
+};
+
+function calcSAC({ valorFinanciado, taxaMensal, prazoMeses, amortMensal, amortPontuais, modoAmort }) {
+  if (valorFinanciado <= 0 || prazoMeses <= 0) return { parcelas: [], totalJuros: 0, totalAmortExtra: 0, totalPago: 0, mesesEfetivos: 0 };
+  let amortBase = valorFinanciado / prazoMeses;
+  const parcelas = [];
+  let saldo = valorFinanciado;
+  let totalJuros = 0, totalAmortExtra = 0, totalPago = 0;
+  const pontualMap = {};
+  if (amortPontuais) { for (const ap of amortPontuais) { if (ap.mes > 0 && ap.valor > 0) pontualMap[ap.mes] = (pontualMap[ap.mes] || 0) + ap.valor; } }
+
+  for (let m = 1; m <= prazoMeses * 2 && saldo > 0.01; m++) {
+    const juros = saldo * taxaMensal;
+    let amort = Math.min(amortBase, saldo);
+    let parcela = amort + juros;
+    let extraDesejado = (amortMensal || 0) + (pontualMap[m] || 0);
+    let extra = Math.min(extraDesejado, Math.max(0, saldo - amort));
+    saldo = saldo - amort - extra;
+    if (saldo < 0.01) saldo = 0;
+    totalJuros += juros; totalAmortExtra += extra; totalPago += parcela + extra;
+    parcelas.push({ mes: m, parcela: Math.round(parcela * 100) / 100, juros: Math.round(juros * 100) / 100, amortizacao: Math.round(amort * 100) / 100, extra: Math.round(extra * 100) / 100, pagTotal: Math.round((parcela + extra) * 100) / 100, saldo: Math.round(saldo * 100) / 100 });
+    if (saldo <= 0) break;
+    if (modoAmort === "parcela" && extra > 0) {
+      const mr = prazoMeses - m;
+      if (mr > 0) amortBase = saldo / mr;
+    }
+  }
+  return { parcelas, totalJuros, totalAmortExtra, totalPago, mesesEfetivos: parcelas.length };
+}
+
+function calcPrice({ valorFinanciado, taxaMensal, prazoMeses, amortMensal, amortPontuais, modoAmort }) {
+  if (valorFinanciado <= 0 || prazoMeses <= 0 || taxaMensal <= 0) return { parcelas: [], totalJuros: 0, totalAmortExtra: 0, totalPago: 0, mesesEfetivos: 0, pmt: 0 };
+  const pmtCalc = (s, r, n) => s * (r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1);
+  let pmt = pmtCalc(valorFinanciado, taxaMensal, prazoMeses);
+  const pmtOriginal = pmt;
+  const parcelas = [];
+  let saldo = valorFinanciado;
+  let totalJuros = 0, totalAmortExtra = 0, totalPago = 0;
+  const pontualMap = {};
+  if (amortPontuais) { for (const ap of amortPontuais) { if (ap.mes > 0 && ap.valor > 0) pontualMap[ap.mes] = (pontualMap[ap.mes] || 0) + ap.valor; } }
+
+  for (let m = 1; m <= prazoMeses * 2 && saldo > 0.01; m++) {
+    const juros = saldo * taxaMensal;
+    let amort = Math.min(pmt - juros, saldo);
+    if (amort < 0) amort = 0;
+    if (amort > saldo) amort = saldo;
+    let parcela = amort + juros;
+    let extraDesejado = (amortMensal || 0) + (pontualMap[m] || 0);
+    let extra = Math.min(extraDesejado, Math.max(0, saldo - amort));
+    saldo = saldo - amort - extra;
+    if (saldo < 0.01) saldo = 0;
+    totalJuros += juros; totalAmortExtra += extra; totalPago += parcela + extra;
+    parcelas.push({ mes: m, parcela: Math.round(parcela * 100) / 100, juros: Math.round(juros * 100) / 100, amortizacao: Math.round(amort * 100) / 100, extra: Math.round(extra * 100) / 100, pagTotal: Math.round((parcela + extra) * 100) / 100, saldo: Math.round(saldo * 100) / 100 });
+    if (saldo <= 0) break;
+    if (modoAmort === "parcela" && extra > 0) {
+      const mr = prazoMeses - m;
+      if (mr > 0 && saldo > 0) pmt = pmtCalc(saldo, taxaMensal, mr);
+    }
+  }
+  return { parcelas, totalJuros, totalAmortExtra, totalPago, mesesEfetivos: parcelas.length, pmt: pmtOriginal };
+}
+
+function Input({ label, value, onChange, prefix, suffix, min, max, step, helpText }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.g500, marginBottom: 5, letterSpacing: "0.05em", textTransform: "uppercase" }}>{label}</label>
+      <div style={{ display: "flex", alignItems: "center", background: C.white, border: "2px solid " + C.g200, borderRadius: 9, overflow: "hidden" }}>
+        {prefix && <span style={{ padding: "10px 0 10px 12px", color: C.g400, fontSize: 14, fontWeight: 600, whiteSpace: "nowrap" }}>{prefix}</span>}
+        <input type="number" value={value} onChange={(e) => onChange(Number(e.target.value))} min={min} max={max} step={step || 1}
+          style={{ flex: 1, border: "none", outline: "none", padding: "10px 12px", fontSize: 15, fontWeight: 700, color: C.navy, background: "transparent", width: "100%" }} />
+        {suffix && <span style={{ padding: "10px 12px 10px 0", color: C.g400, fontSize: 13, fontWeight: 600, whiteSpace: "nowrap" }}>{suffix}</span>}
+      </div>
+      {helpText && <p style={{ fontSize: 10, color: C.g400, marginTop: 3, marginBottom: 0 }}>{helpText}</p>}
+    </div>
+  );
+}
+
+function MiniStat({ label, value, color }) {
+  return (
+    <div style={{ flex: "1 1 140px", minWidth: 130 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: C.g400, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 17, fontWeight: 900, color: color || C.navy, lineHeight: 1.1 }}>{value}</div>
+    </div>
+  );
+}
+
+function TabBtn({ active, onClick, children }) {
+  return <button onClick={onClick} style={{ padding: "8px 16px", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", background: active ? C.navy : "transparent", color: active ? C.white : C.g500, transition: "all 0.15s" }}>{children}</button>;
+}
+
+function FilterBtn({ active, onClick, children, color }) {
+  return <button onClick={onClick} style={{ padding: "5px 14px", border: "2px solid " + (active ? color : C.g200), borderRadius: 7, fontSize: 11, fontWeight: 700, cursor: "pointer", background: active ? color + "14" : "transparent", color: active ? color : C.g400, transition: "all 0.15s" }}>{children}</button>;
+}
+
+const ChartTip = ({ active, payload, label }) => {
+  if (!active || !payload || !payload.length) return null;
+  return (
+    <div style={{ background: C.navyDark, border: "1px solid " + C.navyLight, borderRadius: 10, padding: "10px 14px", boxShadow: "0 8px 32px rgba(0,0,0,0.3)" }}>
+      <p style={{ color: C.g300, fontSize: 11, margin: 0, marginBottom: 5, fontWeight: 600 }}>Mês {label}</p>
+      {payload.map((e, i) => <p key={i} style={{ color: e.color || e.stroke, fontSize: 12, margin: "2px 0", fontWeight: 600 }}>{e.name}: {fmt(e.value)}</p>)}
+    </div>
+  );
+};
+
+function AmortPontualManager({ items, onChange }) {
+  const add = () => onChange([...items, { mes: 12, valor: 10000 }]);
+  const remove = (i) => onChange(items.filter((_, idx) => idx !== i));
+  const update = (i, field, val) => { const next = [...items]; next[i] = { ...next[i], [field]: val }; onChange(next); };
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: C.g500, textTransform: "uppercase", letterSpacing: "0.04em" }}>Amortizações Pontuais</span>
+        <button onClick={add} style={{ padding: "4px 12px", borderRadius: 6, border: "1px solid " + C.green, background: C.green + "12", color: C.green, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ Adicionar</button>
+      </div>
+      {items.map((item, i) => (
+        <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", background: C.white, border: "1px solid " + C.g200, borderRadius: 7, overflow: "hidden", flex: 1 }}>
+            <span style={{ padding: "6px 8px", fontSize: 11, color: C.g400, fontWeight: 600 }}>Mês</span>
+            <input type="number" value={item.mes} onChange={(e) => update(i, "mes", Number(e.target.value))} min={1} style={{ width: 50, border: "none", outline: "none", padding: "6px 4px", fontSize: 13, fontWeight: 700, color: C.navy, background: "transparent", textAlign: "center" }} />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", background: C.white, border: "1px solid " + C.g200, borderRadius: 7, overflow: "hidden", flex: 2 }}>
+            <span style={{ padding: "6px 8px", fontSize: 11, color: C.g400, fontWeight: 600 }}>R$</span>
+            <input type="number" value={item.valor} onChange={(e) => update(i, "valor", Number(e.target.value))} min={0} step={1000} style={{ width: "100%", border: "none", outline: "none", padding: "6px 8px", fontSize: 13, fontWeight: 700, color: C.navy, background: "transparent" }} />
+          </div>
+          <button onClick={() => remove(i)} style={{ width: 28, height: 28, borderRadius: 6, border: "1px solid " + C.g200, background: C.white, color: C.red, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>×</button>
+        </div>
+      ))}
+      {items.length === 0 && <p style={{ fontSize: 11, color: C.g400, margin: "0 0 4px", fontStyle: "italic" }}>Nenhuma — clique em "+ Adicionar" para simular 13°, FGTS, bônus, etc.</p>}
+    </div>
+  );
+}
+
+function exportCSV(parcelas, sistema) {
+  const header = "Mês;Parcela;Juros;Amortização;Extra;Pagamento Total;Saldo Devedor\n";
+  const rows = parcelas.map((r) =>
+    r.mes + ";" + r.parcela.toFixed(2).replace(".", ",") + ";" + r.juros.toFixed(2).replace(".", ",") + ";" + r.amortizacao.toFixed(2).replace(".", ",") + ";" + r.extra.toFixed(2).replace(".", ",") + ";" + r.pagTotal.toFixed(2).replace(".", ",") + ";" + r.saldo.toFixed(2).replace(".", ",")
+  ).join("\n");
+  const bom = "\uFEFF";
+  const blob = new Blob([bom + header + rows], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "financiamento_" + sistema + "_" + new Date().toISOString().slice(0, 10) + ".csv";
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function App() {
+  const [valorImovel, setValorImovel] = useState(500000);
+  const [entrada, setEntrada] = useState(100000);
+  const [taxaAnual, setTaxaAnual] = useState(10.5);
+  const [prazoAnos, setPrazoAnos] = useState(30);
+  const [amortMensal, setAmortMensal] = useState(0);
+  const [amortPontuais, setAmortPontuais] = useState([]);
+  const [modoAmort, setModoAmort] = useState("prazo");
+  const [chartTab, setChartTab] = useState("saldo");
+  const [chartFilter, setChartFilter] = useState("ambos");
+  const [showTable, setShowTable] = useState(false);
+  const [tablePage, setTablePage] = useState(0);
+  const [tableSystem, setTableSystem] = useState("sac");
+
+  const valorFinanciado = Math.max(0, valorImovel - entrada);
+  const taxaMensal = Math.pow(1 + taxaAnual / 100, 1 / 12) - 1;
+  const prazoMeses = prazoAnos * 12;
+  const pctEntrada = valorImovel > 0 ? ((entrada / valorImovel) * 100).toFixed(1) : "0.0";
+  const hasExtra = amortMensal > 0 || amortPontuais.some((a) => a.valor > 0);
+
+  const sacBase = useMemo(() => calcSAC({ valorFinanciado, taxaMensal, prazoMeses, amortMensal: 0, amortPontuais: [], modoAmort: "prazo" }), [valorFinanciado, taxaMensal, prazoMeses]);
+  const priceBase = useMemo(() => calcPrice({ valorFinanciado, taxaMensal, prazoMeses, amortMensal: 0, amortPontuais: [], modoAmort: "prazo" }), [valorFinanciado, taxaMensal, prazoMeses]);
+  const sacExtra = useMemo(() => calcSAC({ valorFinanciado, taxaMensal, prazoMeses, amortMensal, amortPontuais, modoAmort }), [valorFinanciado, taxaMensal, prazoMeses, amortMensal, amortPontuais, modoAmort]);
+  const priceExtra = useMemo(() => calcPrice({ valorFinanciado, taxaMensal, prazoMeses, amortMensal, amortPontuais, modoAmort }), [valorFinanciado, taxaMensal, prazoMeses, amortMensal, amortPontuais, modoAmort]);
+
+  const sacEconomiaJuros = sacBase.totalJuros - sacExtra.totalJuros;
+  const priceEconomiaJuros = priceBase.totalJuros - priceExtra.totalJuros;
+  const sacMesesReduzidos = sacBase.mesesEfetivos - sacExtra.mesesEfetivos;
+  const priceMesesReduzidos = priceBase.mesesEfetivos - priceExtra.mesesEfetivos;
+
+  const showSAC = chartFilter === "ambos" || chartFilter === "sac";
+  const showPrice = chartFilter === "ambos" || chartFilter === "price";
+
+  const chartDataSaldo = useMemo(() => {
+    const maxLen = Math.max(showSAC ? sacBase.parcelas.length : 0, showPrice ? priceBase.parcelas.length : 0);
+    const step = Math.max(1, Math.floor(maxLen / 60));
+    const points = [];
+    for (let i = 0; i < maxLen; i += step) {
+      const point = { label: "" + (i + 1) };
+      if (showSAC && sacExtra.parcelas[i]) point["SAC"] = sacExtra.parcelas[i].saldo;
+      if (showPrice && priceExtra.parcelas[i]) point["Price"] = priceExtra.parcelas[i].saldo;
+      if (hasExtra && showSAC && sacBase.parcelas[i]) point["SAC (sem extra)"] = sacBase.parcelas[i].saldo;
+      if (hasExtra && showPrice && priceBase.parcelas[i]) point["Price (sem extra)"] = priceBase.parcelas[i].saldo;
+      points.push(point);
+    }
+    return points;
+  }, [sacBase, sacExtra, priceBase, priceExtra, hasExtra, showSAC, showPrice]);
+
+  const chartDataParcela = useMemo(() => {
+    const maxLen = Math.max(showSAC ? sacExtra.parcelas.length : 0, showPrice ? priceExtra.parcelas.length : 0);
+    const step = Math.max(1, Math.floor(maxLen / 60));
+    const points = [];
+    for (let i = 0; i < maxLen; i += step) {
+      const point = { label: "" + (i + 1) };
+      if (showSAC && sacExtra.parcelas[i]) { point["SAC - Juros"] = sacExtra.parcelas[i].juros; point["SAC - Amort."] = sacExtra.parcelas[i].amortizacao; }
+      if (showPrice && priceExtra.parcelas[i]) { point["Price - Juros"] = priceExtra.parcelas[i].juros; point["Price - Amort."] = priceExtra.parcelas[i].amortizacao; }
+      points.push(point);
+    }
+    return points;
+  }, [sacExtra, priceExtra, showSAC, showPrice]);
+
+  const ROWS_PER_PAGE = 24;
+  const tableData = tableSystem === "sac" ? sacExtra.parcelas : priceExtra.parcelas;
+  const totalPages = Math.ceil(tableData.length / ROWS_PER_PAGE);
+
+  return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(145deg, " + C.g50 + " 0%, " + C.g100 + " 100%)", fontFamily: "'DM Sans', 'Segoe UI', system-ui, sans-serif", color: C.navy }}>
+
+      {/* HEADER */}
+      <div style={{ background: "linear-gradient(135deg, " + C.navy + " 0%, " + C.navyDark + " 100%)", padding: "26px 20px 22px", borderBottom: "3px solid " + C.green }}>
+        <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+            <div style={{ width: 34, height: 34, borderRadius: 9, background: "linear-gradient(135deg, " + C.green + ", " + C.greenDark + ")", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 900, color: C.white }}>₿</div>
+            <span style={{ fontSize: 12, fontWeight: 700, color: C.green, letterSpacing: "0.08em", textTransform: "uppercase" }}>FinApps Hub</span>
+          </div>
+          <h1 style={{ fontSize: 24, fontWeight: 900, color: C.white, margin: "6px 0 4px" }}>Simulador de Financiamento Imobiliário</h1>
+          <p style={{ fontSize: 13, color: C.g400, margin: 0, fontWeight: 500 }}>SAC vs Price — amortização extra, economia de juros e redução de prazo</p>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1000, margin: "0 auto", padding: "22px 16px 48px" }}>
+
+        {/* INPUTS */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, marginBottom: 18 }}>
+          <div style={{ background: C.white, borderRadius: 14, padding: "20px 18px", border: "1px solid " + C.g200 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 14 }}>
+              <span style={{ fontSize: 15 }}>🏠</span>
+              <span style={{ fontSize: 14, fontWeight: 800, color: C.navy }}>Dados do Financiamento</span>
+            </div>
+            <Input label="Valor do Imóvel" prefix="R$" value={valorImovel} onChange={setValorImovel} min={10000} step={10000} />
+            <Input label="Entrada" prefix="R$" value={entrada} onChange={setEntrada} min={0} step={5000} helpText={pctEntrada + "% do valor — financiando " + fmt(valorFinanciado)} />
+            <Input label="Taxa de Juros Anual" suffix="% a.a." value={taxaAnual} onChange={setTaxaAnual} min={0} max={30} step={0.1} helpText={"Equivale a " + (taxaMensal * 100).toFixed(4) + "% a.m."} />
+            <Input label="Prazo" suffix="anos" value={prazoAnos} onChange={setPrazoAnos} min={1} max={35} helpText={prazoMeses + " parcelas mensais"} />
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
+              {[10, 15, 20, 25, 30, 35].map((a) => (
+                <button key={a} onClick={() => setPrazoAnos(a)} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: "pointer", border: "1px solid " + (prazoAnos === a ? C.navy : C.g200), background: prazoAnos === a ? C.navy : "transparent", color: prazoAnos === a ? C.white : C.g500 }}>{a}a</button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ background: C.white, borderRadius: 14, padding: "20px 18px", border: "1px solid " + C.g200 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 14 }}>
+              <span style={{ fontSize: 15 }}>💸</span>
+              <span style={{ fontSize: 14, fontWeight: 800, color: C.navy }}>Amortização Extra</span>
+            </div>
+            <Input label="Amortização Mensal Extra" prefix="R$" value={amortMensal} onChange={setAmortMensal} min={0} step={100} helpText="Valor adicional pago todo mês além da parcela" />
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.g500, marginBottom: 6, letterSpacing: "0.05em", textTransform: "uppercase" }}>Ao amortizar, prefere:</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                {[{ k: "prazo", l: "Reduzir Prazo", icon: "⏱️", desc: "Quita antes, paga menos juros total" }, { k: "parcela", l: "Reduzir Parcela", icon: "📉", desc: "Parcela cai, mais fôlego mensal" }].map((opt) => (
+                  <button key={opt.k} onClick={() => setModoAmort(opt.k)} style={{ flex: 1, padding: "12px 14px", borderRadius: 10, cursor: "pointer", textAlign: "left", border: "2px solid " + (modoAmort === opt.k ? C.green : C.g200), background: modoAmort === opt.k ? C.green + "08" : C.white, transition: "all 0.15s" }}>
+                    <div style={{ fontSize: 16, marginBottom: 4 }}>{opt.icon}</div>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: modoAmort === opt.k ? C.green : C.navy }}>{opt.l}</div>
+                    <div style={{ fontSize: 10, color: C.g500, fontWeight: 500, marginTop: 2 }}>{opt.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <AmortPontualManager items={amortPontuais} onChange={setAmortPontuais} />
+          </div>
+        </div>
+
+        {/* SAVINGS BANNER */}
+        {hasExtra && (
+          <div style={{ background: "linear-gradient(135deg, " + C.green + "10, " + C.greenDark + "06)", border: "2px solid " + C.green + "35", borderRadius: 14, padding: "18px 22px", marginBottom: 18 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <span style={{ fontSize: 24 }}>🎉</span>
+              <span style={{ fontSize: 16, fontWeight: 900, color: C.green }}>Impacto da Amortização Extra</span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
+              <div style={{ background: C.white, borderRadius: 10, padding: "14px 16px", border: "1px solid " + C.green + "30" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: C.blue, textTransform: "uppercase", marginBottom: 4 }}>SAC — Economia de Juros</div>
+                <div style={{ fontSize: 24, fontWeight: 900, color: C.green }}>{fmt(sacEconomiaJuros)}</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: C.g500, marginTop: 4 }}>
+                  {modoAmort === "prazo" ? "Prazo cai de " + sacBase.mesesEfetivos + " → " + sacExtra.mesesEfetivos + " meses (−" + sacMesesReduzidos + " meses = " + (sacMesesReduzidos / 12).toFixed(1) + " anos a menos)" : "Parcelas reduzidas — prazo mantido próximo ao original"}
+                </div>
+              </div>
+              <div style={{ background: C.white, borderRadius: 10, padding: "14px 16px", border: "1px solid " + C.gold + "30" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: C.gold, textTransform: "uppercase", marginBottom: 4 }}>Price — Economia de Juros</div>
+                <div style={{ fontSize: 24, fontWeight: 900, color: C.green }}>{fmt(priceEconomiaJuros)}</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: C.g500, marginTop: 4 }}>
+                  {modoAmort === "prazo" ? "Prazo cai de " + priceBase.mesesEfetivos + " → " + priceExtra.mesesEfetivos + " meses (−" + priceMesesReduzidos + " meses = " + (priceMesesReduzidos / 12).toFixed(1) + " anos a menos)" : "Parcelas reduzidas — prazo mantido próximo ao original"}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* RESULTADO SAC */}
+        <div style={{ background: C.white, borderRadius: 14, padding: "18px 20px", border: "2px solid " + C.blue + "30", marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <div style={{ width: 14, height: 14, borderRadius: 4, background: C.blue }} />
+            <span style={{ fontSize: 15, fontWeight: 800, color: C.navy }}>Tabela SAC</span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: C.g400 }}>— amortização constante, parcelas decrescentes</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "14px 28px" }}>
+            <MiniStat label="1ª Parcela" value={fmt(sacExtra.parcelas[0] ? sacExtra.parcelas[0].parcela : 0)} color={C.blue} />
+            <MiniStat label="Última Parcela" value={fmt(sacExtra.parcelas.length > 0 ? sacExtra.parcelas[sacExtra.parcelas.length - 1].parcela : 0)} color={C.blue} />
+            <MiniStat label="Total de Juros" value={fmt(sacExtra.totalJuros)} color={C.red} />
+            <MiniStat label="Total Pago" value={fmt(sacExtra.totalPago)} color={C.navy} />
+            <MiniStat label="Prazo Efetivo" value={sacExtra.mesesEfetivos + " meses (" + (sacExtra.mesesEfetivos / 12).toFixed(1) + "a)"} color={C.navy} />
+          </div>
+        </div>
+
+        {/* RESULTADO PRICE */}
+        <div style={{ background: C.white, borderRadius: 14, padding: "18px 20px", border: "2px solid " + C.gold + "30", marginBottom: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <div style={{ width: 14, height: 14, borderRadius: 4, background: C.gold }} />
+            <span style={{ fontSize: 15, fontWeight: 800, color: C.navy }}>Tabela Price</span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: C.g400 }}>— parcelas fixas, amortização crescente</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "14px 28px" }}>
+            <MiniStat label="Parcela Fixa" value={fmt(priceExtra.pmt || 0)} color={C.gold} />
+            <MiniStat label="Total de Juros" value={fmt(priceExtra.totalJuros)} color={C.red} />
+            <MiniStat label="Total Pago" value={fmt(priceExtra.totalPago)} color={C.navy} />
+            <MiniStat label="Prazo Efetivo" value={priceExtra.mesesEfetivos + " meses (" + (priceExtra.mesesEfetivos / 12).toFixed(1) + "a)"} color={C.navy} />
+          </div>
+        </div>
+
+        {/* COMPARATIVO */}
+        <div style={{ background: C.white, borderRadius: 14, padding: "18px 20px", border: "1px solid " + C.g200, marginBottom: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <span style={{ fontSize: 18 }}>⚖️</span>
+            <span style={{ fontSize: 15, fontWeight: 800, color: C.navy }}>Comparativo SAC vs Price</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+            <div style={{ background: C.g50, borderRadius: 10, padding: "14px 16px" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: C.g400, textTransform: "uppercase", marginBottom: 8 }}>Total de Juros</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <div style={{ width: 10, height: 10, borderRadius: 3, background: C.blue }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: C.g600 }}>SAC:</span>
+                <span style={{ fontSize: 14, fontWeight: 800, color: C.blue }}>{fmt(sacExtra.totalJuros)}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ width: 10, height: 10, borderRadius: 3, background: C.gold }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: C.g600 }}>Price:</span>
+                <span style={{ fontSize: 14, fontWeight: 800, color: C.gold }}>{fmt(priceExtra.totalJuros)}</span>
+              </div>
+            </div>
+            <div style={{ background: C.g50, borderRadius: 10, padding: "14px 16px" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: C.g400, textTransform: "uppercase", marginBottom: 8 }}>Total Pago</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <div style={{ width: 10, height: 10, borderRadius: 3, background: C.blue }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: C.g600 }}>SAC:</span>
+                <span style={{ fontSize: 14, fontWeight: 800, color: C.blue }}>{fmt(sacExtra.totalPago)}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ width: 10, height: 10, borderRadius: 3, background: C.gold }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: C.g600 }}>Price:</span>
+                <span style={{ fontSize: 14, fontWeight: 800, color: C.gold }}>{fmt(priceExtra.totalPago)}</span>
+              </div>
+            </div>
+            <div style={{ background: C.green + "08", borderRadius: 10, padding: "14px 16px", border: "1px solid " + C.green + "20" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: C.green, textTransform: "uppercase", marginBottom: 8 }}>Economia SAC vs Price</div>
+              <div style={{ fontSize: 22, fontWeight: 900, color: C.green, marginBottom: 4 }}>{fmt(priceExtra.totalJuros - sacExtra.totalJuros)}</div>
+              <div style={{ fontSize: 11, color: C.g500, fontWeight: 600 }}>a menos em juros no SAC</div>
+            </div>
+            <div style={{ background: C.gold + "08", borderRadius: 10, padding: "14px 16px", border: "1px solid " + C.gold + "20" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: C.goldDark, textTransform: "uppercase", marginBottom: 8 }}>Trade-off</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 4 }}>1ª parcela SAC é {fmt((sacExtra.parcelas[0] ? sacExtra.parcelas[0].parcela : 0) - (priceExtra.pmt || 0))} maior</div>
+              <div style={{ fontSize: 11, color: C.g500, fontWeight: 600 }}>SAC: {fmt(sacExtra.parcelas[0] ? sacExtra.parcelas[0].parcela : 0)} vs Price: {fmt(priceExtra.pmt || 0)}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* CHARTS */}
+        <div style={{ background: C.white, borderRadius: 14, padding: "20px 16px", marginBottom: 18, border: "1px solid " + C.g200 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10 }}>
+            <span style={{ fontSize: 14, fontWeight: 800, color: C.navy }}>📊 Gráficos de Evolução</span>
+            <div style={{ display: "flex", background: C.g100, borderRadius: 9, padding: 3, flexWrap: "wrap" }}>
+              <TabBtn active={chartTab === "saldo"} onClick={() => setChartTab("saldo")}>Saldo Devedor</TabBtn>
+              <TabBtn active={chartTab === "parcela"} onClick={() => setChartTab("parcela")}>Parcelas</TabBtn>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <FilterBtn active={chartFilter === "ambos"} onClick={() => setChartFilter("ambos")} color={C.navy}>Ambos</FilterBtn>
+            <FilterBtn active={chartFilter === "sac"} onClick={() => setChartFilter("sac")} color={C.blue}>Somente SAC</FilterBtn>
+            <FilterBtn active={chartFilter === "price"} onClick={() => setChartFilter("price")} color={C.gold}>Somente Price</FilterBtn>
+          </div>
+
+          {chartTab === "saldo" && (
+            <ResponsiveContainer width="100%" height={320}>
+              <LineChart data={chartDataSaldo} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.g200} />
+                <XAxis dataKey="label" tick={{ fontSize: 10, fill: C.g500 }} interval="preserveStartEnd" />
+                <YAxis tickFormatter={fmtShort} tick={{ fontSize: 11, fill: C.g500 }} width={65} />
+                <Tooltip content={<ChartTip />} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                {showSAC && <Line type="monotone" dataKey="SAC" stroke={C.blue} strokeWidth={2.5} dot={false} />}
+                {showPrice && <Line type="monotone" dataKey="Price" stroke={C.gold} strokeWidth={2.5} dot={false} />}
+                {hasExtra && showSAC && <Line type="monotone" dataKey="SAC (sem extra)" stroke={C.blue} strokeWidth={1.5} strokeDasharray="6 4" dot={false} />}
+                {hasExtra && showPrice && <Line type="monotone" dataKey="Price (sem extra)" stroke={C.gold} strokeWidth={1.5} strokeDasharray="6 4" dot={false} />}
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+
+          {chartTab === "parcela" && (
+            <ResponsiveContainer width="100%" height={320}>
+              <AreaChart data={chartDataParcela} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="gJurosSac" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.red} stopOpacity={0.4} /><stop offset="100%" stopColor={C.red} stopOpacity={0.05} /></linearGradient>
+                  <linearGradient id="gAmortSac" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.blue} stopOpacity={0.4} /><stop offset="100%" stopColor={C.blue} stopOpacity={0.05} /></linearGradient>
+                  <linearGradient id="gJurosPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.redLight} stopOpacity={0.3} /><stop offset="100%" stopColor={C.redLight} stopOpacity={0.05} /></linearGradient>
+                  <linearGradient id="gAmortPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.gold} stopOpacity={0.3} /><stop offset="100%" stopColor={C.gold} stopOpacity={0.05} /></linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.g200} />
+                <XAxis dataKey="label" tick={{ fontSize: 10, fill: C.g500 }} interval="preserveStartEnd" />
+                <YAxis tickFormatter={fmtShort} tick={{ fontSize: 11, fill: C.g500 }} width={65} />
+                <Tooltip content={<ChartTip />} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                {showSAC && <Area type="monotone" dataKey="SAC - Juros" stackId="sac" stroke={C.red} fill="url(#gJurosSac)" strokeWidth={1.5} />}
+                {showSAC && <Area type="monotone" dataKey="SAC - Amort." stackId="sac" stroke={C.blue} fill="url(#gAmortSac)" strokeWidth={1.5} />}
+                {showPrice && <Area type="monotone" dataKey="Price - Juros" stackId="price" stroke={C.redLight} fill="url(#gJurosPrice)" strokeWidth={1.5} />}
+                {showPrice && <Area type="monotone" dataKey="Price - Amort." stackId="price" stroke={C.gold} fill="url(#gAmortPrice)" strokeWidth={1.5} />}
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        {/* TABLE + CSV */}
+        <div style={{ background: C.white, borderRadius: 14, padding: "20px 16px", border: "1px solid " + C.g200, overflowX: "auto" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 14, fontWeight: 800, color: C.navy }}>📋 Tabela Mês a Mês</span>
+              <div style={{ display: "flex", background: C.g100, borderRadius: 7, padding: 2 }}>
+                <TabBtn active={tableSystem === "sac"} onClick={() => { setTableSystem("sac"); setTablePage(0); }}>SAC</TabBtn>
+                <TabBtn active={tableSystem === "price"} onClick={() => { setTableSystem("price"); setTablePage(0); }}>Price</TabBtn>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => exportCSV(tableData, tableSystem)} style={{ padding: "6px 14px", borderRadius: 7, border: "1px solid " + C.green, background: C.green + "10", color: C.green, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>📥 Exportar CSV</button>
+              <button onClick={() => setShowTable(!showTable)} style={{ padding: "6px 14px", borderRadius: 7, border: "1px solid " + C.g200, background: C.white, color: C.navy, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>{showTable ? "Ocultar" : "Expandir"}</button>
+            </div>
+          </div>
+
+          {showTable && (
+            <div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 620 }}>
+                <thead>
+                  <tr style={{ borderBottom: "2px solid " + C.g200 }}>
+                    {["Mês", "Parcela", "Juros", "Amort.", "Extra", "Pag. Total", "Saldo"].map((h) => (
+                      <th key={h} style={{ textAlign: "right", padding: "7px 8px", color: C.g500, fontWeight: 700, fontSize: 10, textTransform: "uppercase" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {tableData.slice(tablePage * ROWS_PER_PAGE, (tablePage + 1) * ROWS_PER_PAGE).map((row, i) => (
+                    <tr key={row.mes} style={{ borderBottom: "1px solid " + C.g100, background: row.extra > 0 ? C.green + "06" : i % 2 === 0 ? "transparent" : C.g50 }}>
+                      <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 700, color: C.navy }}>{row.mes}</td>
+                      <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 600, color: C.g700 }}>{fmt(row.parcela)}</td>
+                      <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 600, color: C.red }}>{fmt(row.juros)}</td>
+                      <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 600, color: C.blue }}>{fmt(row.amortizacao)}</td>
+                      <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 700, color: row.extra > 0 ? C.green : C.g300 }}>{fmt(row.extra)}</td>
+                      <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 700, color: C.navy }}>{fmt(row.pagTotal)}</td>
+                      <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 800, color: row.saldo > 0 ? C.g700 : C.green }}>{fmt(row.saldo)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {totalPages > 1 && (
+                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 8, marginTop: 12 }}>
+                  <button onClick={() => setTablePage(Math.max(0, tablePage - 1))} disabled={tablePage === 0} style={{ padding: "5px 14px", borderRadius: 6, border: "1px solid " + C.g200, background: C.white, color: tablePage === 0 ? C.g300 : C.navy, fontSize: 12, fontWeight: 700, cursor: tablePage === 0 ? "default" : "pointer" }}>← Anterior</button>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: C.g500 }}>Página {tablePage + 1} de {totalPages}</span>
+                  <button onClick={() => setTablePage(Math.min(totalPages - 1, tablePage + 1))} disabled={tablePage >= totalPages - 1} style={{ padding: "5px 14px", borderRadius: 6, border: "1px solid " + C.g200, background: C.white, color: tablePage >= totalPages - 1 ? C.g300 : C.navy, fontSize: 12, fontWeight: 700, cursor: tablePage >= totalPages - 1 ? "default" : "pointer" }}>Próxima →</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {!showTable && (
+            <p style={{ fontSize: 12, color: C.g400, textAlign: "center", margin: "8px 0 0" }}>Clique em "Expandir" para ver todos os {tableData.length} meses — ou exporte direto para CSV</p>
+          )}
+        </div>
+
+        {/* COMO FUNCIONA */}
+        <div style={{ background: C.white, borderRadius: 14, padding: "18px 20px", border: "1px solid " + C.g200, marginTop: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 16 }}>📖</span>
+            <span style={{ fontSize: 14, fontWeight: 800, color: C.navy }}>Como Funciona a Amortização Extra</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
+            <div style={{ background: C.g50, borderRadius: 10, padding: "14px 16px" }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: C.navy, marginBottom: 8 }}>⏱️ Reduzir Prazo</div>
+              <div style={{ fontSize: 12, color: C.g600, lineHeight: 1.6 }}>A parcela base se mantém igual. O valor extra abate diretamente o saldo devedor, fazendo o financiamento ser quitado antes do prazo original. Como o saldo cai mais rápido, os juros das parcelas seguintes são menores — gerando a <strong style={{ color: C.green }}>maior economia de juros</strong> possível.</div>
+            </div>
+            <div style={{ background: C.g50, borderRadius: 10, padding: "14px 16px" }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: C.navy, marginBottom: 8 }}>📉 Reduzir Parcela</div>
+              <div style={{ fontSize: 12, color: C.g600, lineHeight: 1.6 }}>O valor extra abate o saldo, e o sistema recalcula as parcelas futuras com base no saldo reduzido e nos meses restantes do prazo original. O prazo tende a se manter, mas as parcelas ficam progressivamente menores — dando <strong style={{ color: C.green }}>mais fôlego no orçamento mensal</strong>.</div>
+            </div>
+            <div style={{ background: C.green + "06", borderRadius: 10, padding: "14px 16px", border: "1px solid " + C.green + "15" }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: C.green, marginBottom: 8 }}>💡 Dicas de Planejamento</div>
+              <div style={{ fontSize: 12, color: C.g600, lineHeight: 1.6 }}><strong>13° e FGTS:</strong> Use amortizações pontuais para simular esses pagamentos extras anuais. <strong>Estratégia mista:</strong> Comece reduzindo parcela para ganhar fôlego, depois mude para reduzir prazo. <strong>Quanto antes melhor:</strong> Amortizações nos primeiros anos geram mais economia pois o saldo ainda é alto.</div>
+            </div>
+          </div>
+        </div>
+
+        {/* FOOTER */}
+        <div style={{ textAlign: "center", marginTop: 28 }}>
+          <p style={{ fontSize: 11, color: C.g400, margin: 0 }}>Simulação simplificada. Não considera TR, seguros (MIP/DFI) ou taxas administrativas.</p>
+          <p style={{ fontSize: 11, color: C.g400, margin: "3px 0 0" }}><strong style={{ color: C.green }}>FinApps Hub</strong> — Ferramentas financeiras profissionais</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
